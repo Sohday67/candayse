@@ -350,6 +350,35 @@
       margin-top: var(--space-2);
     }
 
+    .interval-progress {
+      display: block;
+      width: min(240px, 68vw);
+      height: 2px;
+      margin-top: var(--space-1);
+      appearance: none;
+      -webkit-appearance: none;
+      border: 0;
+      border-radius: var(--radius-pill);
+      overflow: hidden;
+      background: rgba(255, 255, 255, 0.16);
+      color: var(--clock-sub);
+    }
+
+    .interval-progress::-webkit-progress-bar {
+      background: transparent;
+      border-radius: var(--radius-pill);
+    }
+
+    .interval-progress::-webkit-progress-value {
+      background: var(--clock-sub);
+      border-radius: var(--radius-pill);
+    }
+
+    .interval-progress::-moz-progress-bar {
+      background: var(--clock-sub);
+      border-radius: var(--radius-pill);
+    }
+
     /* Bottom HUD Dock */
     .hud-bottom {
       display: flex;
@@ -1036,6 +1065,7 @@
     <main class="stage-center">
       <div class="timepiece-wrap">
         <div class="clock-display" id="clockDisplay">1:23<span class="clock-period" id="clockPeriod">PM</span></div>
+        <progress class="interval-progress" id="intervalProgress" value="0" max="1800" aria-label="Current 30-minute interval" aria-describedby="countdownSubtext"></progress>
         <div class="subtext-countdown" id="countdownSubtext">Click Start to begin 30-minute check-ins</div>
       </div>
     </main>
@@ -1230,6 +1260,7 @@
       const dateLabel = document.getElementById('dateLabel');
       const clockDisplay = document.getElementById('clockDisplay');
       const countdownSubtext = document.getElementById('countdownSubtext');
+      const intervalProgress = document.getElementById('intervalProgress');
       const btnPrimaryAction = document.getElementById('btnPrimaryAction');
       const primaryIcon = document.getElementById('primaryIcon');
       const primaryLabel = document.getElementById('primaryLabel');
@@ -1477,6 +1508,10 @@
         const remMin = Math.floor(diffMs / 60000);
         const remSec = Math.floor((diffMs % 60000) / 1000);
         const nextLabel = formatTimeShort(nextBoundary);
+
+        // Follow the same half-hour window as the countdown, including after refresh.
+        intervalProgress.value = Math.max(0, Math.min(THIRTY_MIN_MS, THIRTY_MIN_MS - diffMs)) / 1000;
+        intervalProgress.setAttribute('aria-valuetext', `${remMin}m ${String(remSec).padStart(2, '0')}s until ${nextLabel}`);
 
         if (state.session.status === 'active') {
           countdownSubtext.textContent = `${remMin}m ${String(remSec).padStart(2, '0')}s left until ${nextLabel} check-in`;
