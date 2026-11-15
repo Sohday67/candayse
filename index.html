@@ -9,6 +9,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
   <style>
     :root {
+      color-scheme: dark;
       --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
       --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
 
@@ -52,6 +53,7 @@
     }
 
     [data-theme="day"] {
+      color-scheme: light;
       --color-bg: #f4f3ef;
       --color-surface: rgba(250, 249, 245, 0.82);
       --color-surface-solid: #faf9f5;
@@ -89,6 +91,36 @@
       color: var(--color-text-primary);
       -webkit-font-smoothing: antialiased;
       -moz-osx-font-smoothing: grayscale;
+    }
+
+    /* Theme-aware scrollbars for panels, the weekly grid, and note fields. */
+    * {
+      scrollbar-width: thin;
+      scrollbar-color: var(--color-text-muted) var(--color-surface-solid);
+    }
+
+    ::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+
+    ::-webkit-scrollbar-track,
+    ::-webkit-scrollbar-corner {
+      background: var(--color-surface-solid);
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: var(--color-text-muted);
+      border: 2px solid var(--color-surface-solid);
+      border-radius: var(--radius-pill);
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+      background: var(--color-text-secondary);
+    }
+
+    ::-webkit-scrollbar-button {
+      display: none;
     }
 
     /* Atmospheric Circadian Backdrop */
@@ -549,6 +581,8 @@
 
     .panel-body {
       flex: 1;
+      min-height: 0;
+      scrollbar-gutter: stable;
       overflow-y: auto;
       padding: var(--space-6);
     }
@@ -1246,7 +1280,7 @@
       let selectedDayKey = toDateKey(Date.now());
       let weekOffset = 0;
       let weekLayout = 'grid'; // 'grid' | 'stream'
-      let weekFull24h = false;
+      let weekFull24h = true;
       let selectedTag = '';
       let editingEntryId = null;
       let idleTimer = null;
@@ -1569,13 +1603,13 @@
           wakeHud();
           showToast('Session paused');
         } else if (state.session.status === 'paused') {
-          // Unpause: require user to log what they did while paused
+          // Unpause: offer a note or let the user dismiss and resume.
           const pauseStart = state.session.pausedAt || now;
           state.session.pendingCheckin = {
             startTs: pauseStart,
             endTs: now,
             kind: 'paused',
-            requireInput: true
+            requireInput: false
           };
           saveState();
           openCheckinModal(state.session.pendingCheckin);
@@ -1644,7 +1678,7 @@
           modalTitle.textContent = 'Welcome back. What did you do while paused?';
           checkinInput.value = '';
           setSelectedTag('');
-          btnCancelModal.style.display = config.requireInput ? 'none' : 'inline-flex';
+          btnCancelModal.style.display = 'inline-flex';
         } else if (config.kind === 'interval') {
           modalTitle.textContent = `What did you work on between ${startLabel} and ${endLabel}?`;
           checkinInput.value = '';
@@ -1659,6 +1693,12 @@
 
         checkinModal.classList.add('is-open');
         setTimeout(() => checkinInput.focus(), 40);
+      }
+
+      function resumeAfterPause(now) {
+        state.session.status = 'active';
+        state.session.pausedAt = null;
+        state.session.lastBoundaryTs = getCurrentHalfHourFloor(now);
       }
 
       function closeCheckinModal() {
@@ -1714,9 +1754,7 @@
 
           // If this was an unpause check-in, resume active tracking now
           if (pending.kind === 'paused') {
-            state.session.status = 'active';
-            state.session.pausedAt = null;
-            state.session.lastBoundaryTs = getCurrentHalfHourFloor(now);
+            resumeAfterPause(now);
           }
           state.session.pendingCheckin = null;
           saveState();
@@ -1735,11 +1773,16 @@
       });
 
       btnCancelModal.addEventListener('click', () => {
-        if (state.session.pendingCheckin && state.session.pendingCheckin.kind === 'paused' && state.session.pendingCheckin.requireInput) {
-          return;
+        if (!editingEntryId) {
+          const pending = state.session.pendingCheckin;
+          if (pending && pending.kind === 'paused') {
+            resumeAfterPause(Date.now());
+            showToast('Session resumed');
+          }
+          state.session.pendingCheckin = null;
+          saveState();
+          renderSessionUI();
         }
-        state.session.pendingCheckin = null;
-        saveState();
         closeCheckinModal();
       });
 
@@ -1850,6 +1893,14 @@
       });
 
       // Weekly View
+      function entryOverlapsRange(entry, startTs, endTs) {
+        // Instant notes still belong in a slot, including exactly on its boundary.
+        if (entry.startTs === entry.endTs) {
+          return entry.startTs >= startTs && entry.startTs < endTs;
+        }
+        return entry.endTs > startTs && entry.startTs < endTs;
+      }
+
       function getWeekDates(offsetWeeks) {
         const now = new Date();
         const day = now.getDay(); // 0=Sun..6=Sat
@@ -1860,6 +1911,8 @@
           const d = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + i);
           days.push({
             date: d,
+            startTs: d.getTime(),
+            endTs: new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1).getTime(),
             key: toDateKey(d.getTime()),
             label: d.toLocaleDateString(undefined, { weekday: 'short' }),
             shortDate: d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
@@ -1878,21 +1931,24 @@
         btnWeekHoursScope.textContent = weekFull24h ? 'Full 24h' : '07:00 - 22:00';
         btnWeekHoursScope.style.display = weekLayout === 'grid' ? 'inline-flex' : 'none';
 
-        const dayKeysSet = new Set(days.map((d) => d.key));
+        // Use the recorded interval, so logs ending at midnight remain visible
+        // in the week they cover even if an older dateKey names the following day.
+        const weekStart = days[0].startTs;
+        const weekEnd = days[6].endTs;
         const weekEntries = state.entries.filter((ent) => {
-          if (!dayKeysSet.has(ent.dateKey)) return false;
+          if (!entryOverlapsRange(ent, weekStart, weekEnd)) return false;
           if (!query) return true;
           return ent.text.toLowerCase().includes(query) || (ent.tag && ent.tag.toLowerCase().includes(query));
         });
 
-        const totalMs = weekEntries.reduce((acc, ent) => acc + Math.max(0, ent.endTs - ent.startTs), 0);
+        const totalMs = weekEntries.reduce((acc, ent) => acc + Math.max(0, Math.min(ent.endTs, weekEnd) - Math.max(ent.startTs, weekStart)), 0);
         statWeekCount.textContent = String(weekEntries.length);
         statWeekHours.textContent = weekEntries.length ? formatDuration(totalMs) : '0m';
 
         if (weekLayout === 'stream') {
           weekViewContainer.innerHTML = `<div class="week-stream">${days.map((dayObj) => {
             const list = weekEntries
-              .filter((ent) => ent.dateKey === dayObj.key)
+              .filter((ent) => entryOverlapsRange(ent, dayObj.startTs, dayObj.endTs))
               .sort((a, b) => a.startTs - b.startTs);
             return `
               <div class="day-card">
@@ -1933,8 +1989,8 @@
           let cells = '';
           for (const dayObj of days) {
             const slotStart = new Date(dayObj.date.getFullYear(), dayObj.date.getMonth(), dayObj.date.getDate(), hr, min).getTime();
-            const slotEnd = slotStart + THIRTY_MIN_MS;
-            const matching = weekEntries.filter((ent) => ent.endTs > slotStart && ent.startTs < slotEnd);
+            const slotEnd = new Date(dayObj.date.getFullYear(), dayObj.date.getMonth(), dayObj.date.getDate(), hr, min + 30).getTime();
+            const matching = weekEntries.filter((ent) => entryOverlapsRange(ent, slotStart, slotEnd));
 
             cells += `<td class="week-cell" data-slot-start="${slotStart}" data-slot-end="${slotEnd}" title="Click to add entry for ${dayObj.shortDate} ${slotLabel}">
               ${matching.map((ent) => `
@@ -2113,13 +2169,13 @@
 
       window.addEventListener('keydown', (e) => {
         wakeHud();
-        const tag = document.activeElement ? document.activeElement.tagName : '';
-        if (tag === 'INPUT' || tag === 'TEXTAREA') {
-          if (e.key === 'Escape' && checkinModal.classList.contains('is-open')) {
-            btnCancelModal.click();
-          }
+        if (e.key === 'Escape' && checkinModal.classList.contains('is-open')) {
+          e.preventDefault();
+          btnCancelModal.click();
           return;
         }
+        const tag = document.activeElement ? document.activeElement.tagName : '';
+        if (tag === 'INPUT' || tag === 'TEXTAREA') return;
         if (e.key === 'Escape' && activeView !== 'focus') {
           setView('focus');
         } else if (e.key.toLowerCase() === 'm' && !checkinModal.classList.contains('is-open')) {
