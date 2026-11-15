@@ -123,6 +123,15 @@
       display: none;
     }
 
+    .solar-status {
+      max-width: min(90vw, 620px);
+      margin: 12px auto 0;
+      color: var(--color-text-muted);
+      font-size: 12px;
+      line-height: 1.6;
+      text-align: center;
+    }
+
     /* Atmospheric Circadian Backdrop */
     .backdrop {
       position: fixed;
@@ -1147,6 +1156,7 @@
         <div class="clock-display" id="clockDisplay">1:23<span class="clock-period" id="clockPeriod">PM</span></div>
         <progress class="interval-progress" id="intervalProgress" value="0" max="1800" aria-label="Current 30-minute interval" aria-describedby="countdownSubtext"></progress>
         <div class="subtext-countdown" id="countdownSubtext">Click Start to begin 30-minute check-ins</div>
+        <div id="solarStatus" class="solar-status" role="status" hidden title="Approximate location via GeoJS or ipapi. VPNs can affect accuracy. Sunrise and sunset are shown in the estimated location’s time zone; local hours are used if lookup fails."></div>
       </div>
     </main>
 
@@ -1510,15 +1520,179 @@
       }
 
       // Circadian Theme & Imagery
-      function isLocalDaytime() {
-        const hr = new Date().getHours();
-        return hr >= 6 && hr < 18;
+      const SOLAR_DAY_MS = 24 * 60 * 60 * 1000;
+      const LOCATION_KEY = 'candayse_ip_location_v1';
+      const LOCATION_TTL_MS = SOLAR_DAY_MS;
+      const LOCATION_MAX_AGE_MS = 7 * SOLAR_DAY_MS;
+      const LOCATION_RETRY_MS = 15 * 60 * 1000;
+      let circadianLocation = readCircadianLocation();
+      let locationPending = false;
+      let nextLocationAttempt = 0;
+      let solarCache = null;
+      let lastThemeMinute = -1;
+      const solarStatus = document.getElementById('solarStatus');
+
+      function validCoordinates(location) {
+        return location && Number.isFinite(location.latitude) && Math.abs(location.latitude) <= 90 &&
+          Number.isFinite(location.longitude) && Math.abs(location.longitude) <= 180;
       }
 
-      function getEffectiveTheme() {
+      function usableLocation(now = Date.now()) {
+        return validCoordinates(circadianLocation) && Number.isFinite(circadianLocation.savedAt) &&
+          now >= circadianLocation.savedAt && now - circadianLocation.savedAt < LOCATION_MAX_AGE_MS;
+      }
+
+      function readCircadianLocation() {
+        try {
+          const saved = JSON.parse(localStorage.getItem(LOCATION_KEY));
+          if (!validCoordinates(saved) || !Number.isFinite(saved.savedAt)) return null;
+          const location = normalizeLocation({ ...saved, timezone: saved.timeZone });
+          location.savedAt = saved.savedAt;
+          return location;
+        } catch (e) {
+          return null;
+        }
+      }
+
+      function normalizeLocation(data) {
+        if (!data || data.error || data.success === false) throw new Error('Location unavailable');
+        const coordinate = (value) => {
+          if (typeof value !== 'number' && (typeof value !== 'string' || !value.trim())) return NaN;
+          return Number(value);
+        };
+        const location = {
+          latitude: coordinate(data.latitude),
+          longitude: coordinate(data.longitude),
+          city: typeof data.city === 'string' ? data.city.slice(0, 80) : '',
+          timeZone: typeof data.timezone === 'string' ? data.timezone : '',
+          savedAt: Date.now()
+        };
+        if (!validCoordinates(location)) throw new Error('Invalid coordinates');
+        try {
+          new Intl.DateTimeFormat(undefined, { timeZone: location.timeZone }).format();
+        } catch (e) {
+          location.timeZone = '';
+        }
+        return location; // Deliberately discard the IP address and other response fields.
+      }
+
+      async function fetchApproximateLocation(url) {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 5000);
+        try {
+          const response = await fetch(url, {
+            signal: controller.signal, credentials: 'omit', referrerPolicy: 'no-referrer', cache: 'no-store'
+          });
+          if (!response.ok) throw new Error('Location lookup failed');
+          return normalizeLocation(await response.json());
+        } finally {
+          clearTimeout(timeout);
+        }
+      }
+
+      async function refreshCircadianLocation() {
+        const now = Date.now();
+        if (state.prefs.themeMode !== 'auto' || locationPending || now < nextLocationAttempt) return;
+        if (usableLocation(now) && now - circadianLocation.savedAt < LOCATION_TTL_MS) return;
+        locationPending = true;
+        nextLocationAttempt = now + LOCATION_RETRY_MS;
+        applyCircadianTheme();
+        try {
+          // HTTPS/CORS endpoints run in the visitor's browser, never on the hosting server.
+          // GeoJS docs: https://www.geojs.io/docs/v1/endpoints/geo/
+          for (const url of ['https://get.geojs.io/v1/ip/geo.json', 'https://ipapi.co/json/']) {
+            try {
+              circadianLocation = await fetchApproximateLocation(url);
+              solarCache = null;
+              try {
+                localStorage.setItem(LOCATION_KEY, JSON.stringify(circadianLocation));
+              } catch (e) { /* Auto mode also works when browser storage is unavailable. */ }
+              break;
+            } catch (e) { /* Try the backup provider, then use cached location or local hours. */ }
+          }
+        } finally {
+          locationPending = false;
+          applyCircadianTheme(); // Respects a manual mode selected during the request.
+        }
+      }
+
+      function calculateSunTimes(now, latitude, longitude) {
+        // NOAA solar equations, with the standard 90.833-degree sunrise/sunset zenith:
+        // https://www.gml.noaa.gov/grad/solcalc/solareqns.PDF
+        // Anchor to the location's solar day, not the browser's date or UTC midnight.
+        // This also works across the date line and when the device uses another time zone.
+        const dayStart = Math.floor((now + longitude * 240000) / SOLAR_DAY_MS) * SOLAR_DAY_MS;
+        const year = new Date(dayStart).getUTCFullYear();
+        const yearStart = Date.UTC(year, 0, 1);
+        const daysInYear = (Date.UTC(year + 1, 0, 1) - yearStart) / SOLAR_DAY_MS;
+        const gamma = 2 * Math.PI / daysInYear * ((dayStart - yearStart) / SOLAR_DAY_MS);
+        const eqTime = 229.18 * (0.000075 + 0.001868 * Math.cos(gamma) - 0.032077 * Math.sin(gamma) -
+          0.014615 * Math.cos(2 * gamma) - 0.040849 * Math.sin(2 * gamma));
+        const declination = 0.006918 - 0.399912 * Math.cos(gamma) + 0.070257 * Math.sin(gamma) -
+          0.006758 * Math.cos(2 * gamma) + 0.000907 * Math.sin(2 * gamma) -
+          0.002697 * Math.cos(3 * gamma) + 0.00148 * Math.sin(3 * gamma);
+        const radians = Math.PI / 180;
+        const lat = latitude * radians;
+        const hourAngleCos = (Math.cos(90.833 * radians) - Math.sin(lat) * Math.sin(declination)) /
+          (Math.cos(lat) * Math.cos(declination));
+        if (hourAngleCos < -1) return { dayStart, polar: 'day' };
+        if (hourAngleCos > 1) return { dayStart, polar: 'night' };
+        const halfDayMinutes = 4 * Math.acos(hourAngleCos) / radians;
+        const noonMinutes = 720 - 4 * longitude - eqTime;
+        return {
+          dayStart,
+          sunrise: dayStart + (noonMinutes - halfDayMinutes) * 60000,
+          sunset: dayStart + (noonMinutes + halfDayMinutes) * 60000
+        };
+      }
+
+      function getSunTimes(now = Date.now()) {
+        if (!usableLocation(now)) return null;
+        const { latitude, longitude } = circadianLocation;
+        const dayStart = Math.floor((now + longitude * 240000) / SOLAR_DAY_MS) * SOLAR_DAY_MS;
+        if (!solarCache || solarCache.dayStart !== dayStart) {
+          solarCache = calculateSunTimes(now, latitude, longitude);
+        }
+        return solarCache;
+      }
+
+      function isLocalDaytime(now = Date.now()) {
+        const sun = getSunTimes(now);
+        if (sun) return sun.polar ? sun.polar === 'day' : now >= sun.sunrise && now < sun.sunset;
+        const hour = new Date(now).getHours();
+        return hour >= 6 && hour < 18;
+      }
+
+      function getEffectiveTheme(now = Date.now()) {
         if (state.prefs.themeMode === 'day') return 'day';
         if (state.prefs.themeMode === 'night') return 'night';
-        return isLocalDaytime() ? 'day' : 'night';
+        return isLocalDaytime(now) ? 'day' : 'night';
+      }
+
+      function updateSolarStatus() {
+        const isAuto = state.prefs.themeMode === 'auto';
+        solarStatus.hidden = !isAuto;
+        let description = 'Switch Auto / Day / Night';
+        if (isAuto) {
+          const now = Date.now();
+          const sun = getSunTimes(now);
+          if (sun) {
+            const options = { hour: 'numeric', minute: '2-digit', hour12: state.prefs.hourFormat !== '24h' };
+            if (circadianLocation.timeZone) options.timeZone = circadianLocation.timeZone;
+            const format = (ts) => new Date(ts).toLocaleTimeString(undefined, options);
+            const locationLabel = circadianLocation.city || 'your area';
+            const savedLabel = now - circadianLocation.savedAt >= LOCATION_TTL_MS ? 'saved IP estimate' : 'IP estimate';
+            description = `Auto · ${locationLabel} (${savedLabel}) · ` + (sun.polar ?
+              (sun.polar === 'day' ? 'Sun stays up today' : 'Sun stays down today') :
+              `Sunrise ${format(sun.sunrise)} · Sunset ${format(sun.sunset)}`);
+          } else {
+            description = locationPending ? 'Auto · Estimating location… · Using local hours for now' :
+              'Auto · Location unavailable · Using 6 AM–6 PM local time';
+          }
+          solarStatus.textContent = description;
+        }
+        btnTheme.title = description;
+        btnTheme.setAttribute('aria-label', `${description}. Cycle Auto, Daylight, Nightfall`);
       }
 
       function applyCircadianTheme() {
@@ -1534,6 +1708,7 @@
 
         const modeLabels = { auto: 'Auto', day: 'Daylight', night: 'Nightfall' };
         themeLabel.textContent = modeLabels[state.prefs.themeMode] || 'Auto';
+        updateSolarStatus();
 
         if (effective === 'day') {
           themeIcon.innerHTML = '<circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"></path>';
@@ -1569,7 +1744,6 @@
         const d = new Date(now);
         const h24 = d.getHours();
         const mins = String(d.getMinutes()).padStart(2, '0');
-        const secs = d.getSeconds();
 
         if (state.prefs.hourFormat === '24h') {
           clockDisplay.innerHTML = `${String(h24).padStart(2, '0')}:${mins}`;
@@ -1626,9 +1800,14 @@
           }
         }
 
-        // Re-evaluate circadian auto theme at top of hour
-        if (secs === 0 && state.prefs.themeMode === 'auto') {
-          applyCircadianTheme();
+        // Recheck on every tick so sunrise/sunset and resumed tabs never miss a transition.
+        if (state.prefs.themeMode === 'auto') {
+          refreshCircadianLocation();
+          const minute = Math.floor(now / 60000);
+          if (lastThemeMinute !== minute || document.body.getAttribute('data-theme') !== getEffectiveTheme(now)) {
+            lastThemeMinute = minute;
+            applyCircadianTheme();
+          }
         }
       }
 
@@ -2165,6 +2344,7 @@
         state.prefs.themeMode = order[nextIdx];
         saveState();
         applyCircadianTheme();
+        refreshCircadianLocation();
       });
 
       btnScene.addEventListener('click', () => {
@@ -2182,6 +2362,7 @@
         state.prefs.hourFormat = state.prefs.hourFormat === '12h' ? '24h' : '12h';
         saveState();
         tickClock();
+        updateSolarStatus();
         renderActiveOverlay();
       });
 
@@ -2265,6 +2446,16 @@
         } else if (e.key.toLowerCase() === 'm' && !checkinModal.classList.contains('is-open')) {
           btnMute.click();
         }
+      });
+
+      // Refresh immediately after sleep, returning to the tab, or reconnecting.
+      document.addEventListener('visibilitychange', () => {
+        if (!document.hidden) tickClock();
+      });
+      window.addEventListener('focus', tickClock);
+      window.addEventListener('online', () => {
+        nextLocationAttempt = 0;
+        tickClock();
       });
 
       // Init
