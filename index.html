@@ -908,6 +908,52 @@
       font-variant-numeric: tabular-nums;
     }
 
+    .modal-logged-section {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .modal-logged-section[hidden] {
+      display: none;
+    }
+
+    .modal-logged-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      max-height: 152px;
+      overflow-y: auto;
+      padding-right: 2px;
+    }
+
+    .modal-logged-item {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      padding: 6px 8px;
+      border-radius: var(--radius-sm);
+      border-left: 2px solid var(--color-accent);
+      background: var(--color-surface);
+    }
+
+    .modal-logged-item-meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--space-2);
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--color-text-muted);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .modal-logged-item-text {
+      font-size: 13px;
+      line-height: 1.4;
+      color: var(--color-text-primary);
+      word-break: break-word;
+    }
+
     .modal-title {
       font-size: 20px;
       font-weight: 600;
@@ -1224,6 +1270,9 @@
         <span id="modalWindowLabel">1:00 PM - 1:30 PM</span>
       </div>
       <h3 class="modal-title" id="modalTitle">What have you worked on during this interval?</h3>
+      <div id="modalLoggedSection" class="modal-logged-section" hidden>
+        <div id="modalLoggedList" class="modal-logged-list"></div>
+      </div>
       <form id="checkinForm">
         <textarea id="checkinInput" class="modal-textarea" placeholder="Write a concise note of what you accomplished..." required></textarea>
         <div class="tag-row" style="margin-top: 12px;" id="tagRow">
@@ -1335,6 +1384,8 @@
       const checkinModal = document.getElementById('checkinModal');
       const modalWindowLabel = document.getElementById('modalWindowLabel');
       const modalTitle = document.getElementById('modalTitle');
+      const modalLoggedSection = document.getElementById('modalLoggedSection');
+      const modalLoggedList = document.getElementById('modalLoggedList');
       const checkinForm = document.getElementById('checkinForm');
       const checkinInput = document.getElementById('checkinInput');
       const modalError = document.getElementById('modalError');
@@ -1659,6 +1710,37 @@
         }
       }
 
+      function renderModalLoggedEntries(config, entryToEdit) {
+        if (entryToEdit || (config.kind !== 'manual' && config.kind !== 'interval')) {
+          modalLoggedSection.hidden = true;
+          modalLoggedList.innerHTML = '';
+          return;
+        }
+
+        const windowStart = getCurrentHalfHourFloor(config.startTs);
+        const windowEnd = windowStart + THIRTY_MIN_MS;
+        const logged = state.entries
+          .filter((ent) => entryOverlapsRange(ent, windowStart, windowEnd))
+          .sort((a, b) => a.startTs - b.startTs);
+
+        if (!logged.length) {
+          modalLoggedSection.hidden = true;
+          modalLoggedList.innerHTML = '';
+          return;
+        }
+
+        modalLoggedList.innerHTML = logged.map((ent) => `
+          <div class="modal-logged-item">
+            <div class="modal-logged-item-meta">
+              <span>${escapeHtml(formatTimeShort(ent.startTs))} - ${escapeHtml(formatTimeShort(ent.endTs))}</span>
+              ${ent.tag ? `<span class="tag-chip">${escapeHtml(ent.tag)}</span>` : ''}
+            </div>
+            <div class="modal-logged-item-text">${escapeHtml(ent.text)}</div>
+          </div>
+        `).join('');
+        modalLoggedSection.hidden = false;
+      }
+
       // Check-in Modal
       function openCheckinModal(config, entryToEdit = null) {
         wakeHud();
@@ -1668,6 +1750,8 @@
         const startLabel = formatTimeShort(config.startTs);
         const endLabel = formatTimeShort(config.endTs);
         modalWindowLabel.textContent = `${startLabel} - ${endLabel}`;
+
+        renderModalLoggedEntries(config, entryToEdit);
 
         if (entryToEdit) {
           modalTitle.textContent = 'Edit interval entry';
