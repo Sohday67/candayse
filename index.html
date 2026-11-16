@@ -123,15 +123,6 @@
       display: none;
     }
 
-    .solar-status {
-      max-width: min(90vw, 620px);
-      margin: 12px auto 0;
-      color: var(--color-text-muted);
-      font-size: 12px;
-      line-height: 1.6;
-      text-align: center;
-    }
-
     /* Atmospheric Circadian Backdrop */
     .backdrop {
       position: fixed;
@@ -1156,7 +1147,6 @@
         <div class="clock-display" id="clockDisplay">1:23<span class="clock-period" id="clockPeriod">PM</span></div>
         <progress class="interval-progress" id="intervalProgress" value="0" max="1800" aria-label="Current 30-minute interval" aria-describedby="countdownSubtext"></progress>
         <div class="subtext-countdown" id="countdownSubtext">Click Start to begin 30-minute check-ins</div>
-        <div id="solarStatus" class="solar-status" role="status" hidden title="Approximate location via GeoJS or ipapi. VPNs can affect accuracy. Sunrise and sunset are shown in the estimated location’s time zone; local hours are used if lookup fails."></div>
       </div>
     </main>
 
@@ -1529,8 +1519,6 @@
       let locationPending = false;
       let nextLocationAttempt = 0;
       let solarCache = null;
-      let lastThemeMinute = -1;
-      const solarStatus = document.getElementById('solarStatus');
 
       function validCoordinates(location) {
         return location && Number.isFinite(location.latitude) && Math.abs(location.latitude) <= 90 &&
@@ -1546,9 +1534,8 @@
         try {
           const saved = JSON.parse(localStorage.getItem(LOCATION_KEY));
           if (!validCoordinates(saved) || !Number.isFinite(saved.savedAt)) return null;
-          const location = normalizeLocation({ ...saved, timezone: saved.timeZone });
-          location.savedAt = saved.savedAt;
-          return location;
+          const { latitude, longitude, savedAt } = saved;
+          return { latitude, longitude, savedAt };
         } catch (e) {
           return null;
         }
@@ -1563,16 +1550,9 @@
         const location = {
           latitude: coordinate(data.latitude),
           longitude: coordinate(data.longitude),
-          city: typeof data.city === 'string' ? data.city.slice(0, 80) : '',
-          timeZone: typeof data.timezone === 'string' ? data.timezone : '',
           savedAt: Date.now()
         };
         if (!validCoordinates(location)) throw new Error('Invalid coordinates');
-        try {
-          new Intl.DateTimeFormat(undefined, { timeZone: location.timeZone }).format();
-        } catch (e) {
-          location.timeZone = '';
-        }
         return location; // Deliberately discard the IP address and other response fields.
       }
 
@@ -1596,7 +1576,6 @@
         if (usableLocation(now) && now - circadianLocation.savedAt < LOCATION_TTL_MS) return;
         locationPending = true;
         nextLocationAttempt = now + LOCATION_RETRY_MS;
-        applyCircadianTheme();
         try {
           // HTTPS/CORS endpoints run in the visitor's browser, never on the hosting server.
           // GeoJS docs: https://www.geojs.io/docs/v1/endpoints/geo/
@@ -1669,32 +1648,6 @@
         return isLocalDaytime(now) ? 'day' : 'night';
       }
 
-      function updateSolarStatus() {
-        const isAuto = state.prefs.themeMode === 'auto';
-        solarStatus.hidden = !isAuto;
-        let description = 'Switch Auto / Day / Night';
-        if (isAuto) {
-          const now = Date.now();
-          const sun = getSunTimes(now);
-          if (sun) {
-            const options = { hour: 'numeric', minute: '2-digit', hour12: state.prefs.hourFormat !== '24h' };
-            if (circadianLocation.timeZone) options.timeZone = circadianLocation.timeZone;
-            const format = (ts) => new Date(ts).toLocaleTimeString(undefined, options);
-            const locationLabel = circadianLocation.city || 'your area';
-            const savedLabel = now - circadianLocation.savedAt >= LOCATION_TTL_MS ? 'saved IP estimate' : 'IP estimate';
-            description = `Auto · ${locationLabel} (${savedLabel}) · ` + (sun.polar ?
-              (sun.polar === 'day' ? 'Sun stays up today' : 'Sun stays down today') :
-              `Sunrise ${format(sun.sunrise)} · Sunset ${format(sun.sunset)}`);
-          } else {
-            description = locationPending ? 'Auto · Estimating location… · Using local hours for now' :
-              'Auto · Location unavailable · Using 6 AM–6 PM local time';
-          }
-          solarStatus.textContent = description;
-        }
-        btnTheme.title = description;
-        btnTheme.setAttribute('aria-label', `${description}. Cycle Auto, Daylight, Nightfall`);
-      }
-
       function applyCircadianTheme() {
         const effective = getEffectiveTheme();
         document.body.setAttribute('data-theme', effective);
@@ -1707,8 +1660,9 @@
         });
 
         const modeLabels = { auto: 'Auto', day: 'Daylight', night: 'Nightfall' };
-        themeLabel.textContent = modeLabels[state.prefs.themeMode] || 'Auto';
-        updateSolarStatus();
+        const modeLabel = modeLabels[state.prefs.themeMode] || 'Auto';
+        themeLabel.textContent = modeLabel;
+        btnTheme.setAttribute('aria-label', `${modeLabel} theme. Cycle Auto, Daylight, Nightfall`);
 
         if (effective === 'day') {
           themeIcon.innerHTML = '<circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"></path>';
@@ -1803,9 +1757,7 @@
         // Recheck on every tick so sunrise/sunset and resumed tabs never miss a transition.
         if (state.prefs.themeMode === 'auto') {
           refreshCircadianLocation();
-          const minute = Math.floor(now / 60000);
-          if (lastThemeMinute !== minute || document.body.getAttribute('data-theme') !== getEffectiveTheme(now)) {
-            lastThemeMinute = minute;
+          if (document.body.getAttribute('data-theme') !== getEffectiveTheme(now)) {
             applyCircadianTheme();
           }
         }
@@ -2362,7 +2314,6 @@
         state.prefs.hourFormat = state.prefs.hourFormat === '12h' ? '24h' : '12h';
         saveState();
         tickClock();
-        updateSolarStatus();
         renderActiveOverlay();
       });
 
